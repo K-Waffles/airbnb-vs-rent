@@ -16,6 +16,10 @@ It asks, in order:
 Any answer can be given as a flag instead, to skip its question, e.g.:
     .venv/bin/python estimate.py --setup part --lat 38.8899 --lon -76.9905 --bedrooms 1 --bathrooms 1 --type Apartment
 
+Costs come from assumptions.py:
+    .venv/bin/python estimate.py --assumptions               # list them, with sources
+    .venv/bin/python estimate.py --set airbnb_fee_percent=3  # change one for this run
+
 Uses the clean tables from clean_data.py, so run that first.
 """
 import argparse
@@ -23,6 +27,8 @@ import re
 
 import pandas as pd
 
+from assumptions import print_settings, with_overrides
+from costs import airbnb_break_even_nights, airbnb_lines, net, rental_lines
 from models import (MIN_COMPS, PROPERTY_TYPES_FOR_INPUT, booking_levels, find_comps,
                     median_range, regression_predict)
 
@@ -137,7 +143,7 @@ def ask_nights(setup, typical, cap):
     return nights
 
 
-# ---------- Long-term rental ----------
+# ---------- Printing helpers ----------
 
 def print_comps(comps, columns):
     for _, c in comps.head(SHOW_COMPS).iterrows():
@@ -146,13 +152,25 @@ def print_comps(comps, columns):
         print(f"      {c['miles']:.2f} mi  {size:<10} {c['property_type']:<13}  {details}")
 
 
-def estimate_rent(rentals, args):
-    """Print the typical rent of similar nearby rentals, and return it."""
+def print_lines(title, lines):
+    """Print income and cost lines (skipping zeros) and their total."""
+    print(f"  {title}")
+    for label, amount in lines:
+        if round(amount):
+            text = ("-" if amount < 0 else "") + money(abs(amount))
+            print(f"    {label:<32} {text:>9}")
+    print(f"    {'Net income':<32} {money(net(lines)):>9} per month")
+
+
+# ---------- Long-term rental ----------
+
+def estimate_rent(rentals, args, a):
+    """Print the rent estimate and costs. Returns (gross rent, net rent)."""
     comps, radius = find_comps(rentals, args.lat, args.lon, args.bedrooms)
     print("LONG-TERM RENTAL")
     if comps.empty:
         print("  No comparable rentals found.\n")
-        return None
+        return None, None
 
     rent = comps["monthly_income"]
     estimate = rent.median()
@@ -173,7 +191,10 @@ def estimate_rent(rentals, args):
     print("  Closest comps:")
     print_comps(comps, [("monthly_income", lambda v: f"{money(v)}/mo")])
     print()
-    return estimate
+    lines = rental_lines(estimate, a)
+    print_lines("After costs:", lines)
+    print()
+    return estimate, net(lines)
 
 
 # ---------- Airbnb ----------
@@ -210,12 +231,8 @@ def airbnb_basis(airbnb, args):
     }
 
 
-def monthly(price, nights):
-    return price * nights / 12  # nightly price x nights per year, spread over 12 months
-
-
-def estimate_airbnb(b, args, nights):
-    """Print the Airbnb estimate and return the monthly income at the chosen nights."""
+def estimate_airbnb(b, args, nights, a):
+    """Print the Airbnb estimate and costs. Returns net monthly income at the chosen nights."""
     print("AIRBNB")
     if b is None:
         print("  No comparable Airbnbs found.\n")
@@ -225,7 +242,10 @@ def estimate_airbnb(b, args, nights):
     print(f"  Nightly price: {money(price)}   (80% sure the typical comp is {money(low)}-{money(high)})")
     print(f"  Based on {len(b['comps'])} {size_label(args.bedrooms)} Airbnbs within {b['radius']} mi.")
     print(f"  Nights booked per year, from {b['source']}.")
-    print("  Monthly income (averaged over the year):")
+    print("  Closest comps:")
+    print_comps(b["comps"], [("nightly_price", lambda v: f"{money(v)}/night"),
+                             ("nights_booked", lambda v: f"{v:.0f} nights")])
+    print()
 
     rows = [("Low bookings", b["low"]), ("Typical bookings", b["typical"]), ("Strong bookings", b["strong"])]
     if b["cap"]:
@@ -236,44 +256,62 @@ def estimate_airbnb(b, args, nights):
     chosen_row = "Your estimate" if nights is not None else "Typical bookings"
     chosen = nights if nights is not None else b["typical"]
 
+    def lines_at(n):
+        return airbnb_lines(price, n, args.bedrooms, args.setup, a)
+
+    print(f"  Monthly income, averaged over the year:  {'gross':>8} {'net':>9}")
     for name, n in rows:
         marker = "  <- used below" if name == chosen_row else ""
-        print(f"    {name:<18} {n:>4.0f} nights/year  ->  {money(monthly(price, n))}/month{marker}")
-
-    print("  Closest comps:")
-    print_comps(b["comps"], [("nightly_price", lambda v: f"{money(v)}/night"),
-                             ("nights_booked", lambda v: f"{v:.0f} nights")])
+        gross = lines_at(n)[0][1]  # nightly bookings only
+        print(f"    {name:<18} {n:>4.0f} nights/year  {money(gross):>8} {money(net(lines_at(n))):>9}{marker}")
     print()
-    return monthly(price, chosen)
+    print_lines(f"After costs, at {chosen:.0f} nights/year:", lines_at(chosen))
+    print()
+    return net(lines_at(chosen))
 
 
 # ---------- Recommendation ----------
 
-def recommend(rent, airbnb_income, b, nights, setup):
-    print("RECOMMENDATION (before costs)")
-    if rent is None or airbnb_income is None:
+def recommend(rent_net, airbnb_net, b, nights, args, a):
+    print("RECOMMENDATION (after costs)")
+    if rent_net is None or airbnb_net is None:
         print("  Not enough comparable listings to compare.")
         return
 
     basis = "your estimate of nights" if nights is not None else "typical bookings"
-    winner = "Airbnb" if airbnb_income > rent else "Long-term renting"
+    winner = "Airbnb" if airbnb_net > rent_net else "Long-term renting"
     print(f"  With {basis}: {winner} earns more "
-          f"(Airbnb {money(airbnb_income)} vs. rent {money(rent)} per month).")
+          f"(Airbnb {money(airbnb_net)} vs. rent {money(rent_net)} per month, after costs).")
 
-    # Break-even: how many nights Airbnb needs to match the rent.
-    break_even = rent * 12 / b["price"]
+    # Break-even: how many nights Airbnb needs to match renting, after costs.
+    break_even = airbnb_break_even_nights(b["price"], args.bedrooms, args.setup, a, rent_net)
     if b["cap"] and break_even > b["cap"]:
         print(f"  Even at DC's {b['cap']}-night maximum, renting earns more. "
               f"Airbnb would need about {break_even:.0f} nights.")
+    elif break_even > 365:
+        print("  Airbnb can't match renting here, even booked every night.")
     else:
         print(f"  Airbnb earns more than renting if booked more than about {break_even:.0f} nights a year.")
 
-    print("  Not yet counted: Airbnb's cleaning, platform fees, furnishing, supplies and your time.")
-    if setup == "whole":
+    print("  Not counted: your own time hosting, and income tax (which applies to both).")
+    if args.setup == "whole":
         print("  Keep in mind: renting long-term means moving out. A vacation rental earns money")
         print(f"  only while you're away, up to {VACATION_RENTAL_CAP} nights a year.")
+    print("  Costs are assumptions: see them with --assumptions, change one with --set KEY=VALUE.")
     print("  DC allows short-term rentals only in your primary residence, with a license.")
     print("  Rules change, so check with DC's Department of Licensing and Consumer Protection.")
+
+
+def parse_overrides(pairs):
+    """['airbnb_fee_percent=3', ...] -> {'airbnb_fee_percent': 3.0}"""
+    overrides = {}
+    for pair in pairs:
+        key, _, value = pair.partition("=")
+        try:
+            overrides[key.strip()] = float(value)
+        except ValueError:
+            raise SystemExit(f"--set needs KEY=NUMBER, got: {pair}")
+    return overrides
 
 
 def main():
@@ -286,7 +324,18 @@ def main():
     parser.add_argument("--bedrooms", type=int, help="bedrooms in the space you'd rent out (0 for a studio)")
     parser.add_argument("--bathrooms", type=float, help="e.g. 1.5")
     parser.add_argument("--type", choices=PROPERTY_TYPES_FOR_INPUT)
+    parser.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
+                        help="change a cost assumption for this run (repeatable)")
+    parser.add_argument("--assumptions", action="store_true", help="list the cost assumptions and exit")
     args = parser.parse_args()
+
+    try:
+        a = with_overrides(parse_overrides(args.set))
+    except ValueError as e:
+        raise SystemExit(f"{e}. See them all with --assumptions.")
+    if args.assumptions:
+        print_settings(a)
+        return
 
     fill_in_property(args)
     b = airbnb_basis(pd.read_csv(AIRBNB_CLEAN), args)
@@ -294,9 +343,9 @@ def main():
 
     print(f"\nProperty: {args.bedrooms} bd / {args.bathrooms:g} ba {args.type} at ({args.lat}, {args.lon})")
     print(f"Renting out: {SETUPS[args.setup]}\n")
-    rent = estimate_rent(pd.read_csv(RENTALS_CLEAN), args)
-    airbnb_income = estimate_airbnb(b, args, nights)
-    recommend(rent, airbnb_income, b, nights, args.setup)
+    _, rent_net = estimate_rent(pd.read_csv(RENTALS_CLEAN), args, a)
+    airbnb_net = estimate_airbnb(b, args, nights, a)
+    recommend(rent_net, airbnb_net, b, nights, args, a)
 
 
 if __name__ == "__main__":
