@@ -34,6 +34,10 @@ CLEAN_COLUMNS = [
     "property_type",   # one of PROPERTY_TYPES
     "monthly_income",  # dollars per month, before any costs
     "data_date",       # when the listing was seen
+    # Airbnb only (blank for rentals):
+    "nightly_price",   # listed price per night
+    "nights_booked",   # estimated nights booked in the last year
+    "license_type",    # DC license: "hosted", "unhosted", "exempt" or "none"
 ]
 
 # Both datasets get sorted into RentCast's categories.
@@ -59,6 +63,16 @@ AIRBNB_TYPE_MAP = {
 
 # A listing counts as an active Airbnb if it was booked at least this many nights last year.
 MIN_NIGHTS_BOOKED = 30
+
+# DC short-term rentals are stays under 30 nights. Listings that require 30+
+# nights are really furnished monthly rentals, so they're dropped.
+MAX_MINIMUM_STAY = 30
+
+# Only keep established listings: listed for at least a year (first review a
+# year or more before the data was collected) and still getting reviews.
+# New or fading listings understate what a property can book.
+MIN_MONTHS_LISTED = 12
+MIN_REVIEWS_LAST_YEAR = 3
 
 # The app only estimates properties in this bedroom range; there are too few
 # larger ones to compare against.
@@ -109,6 +123,20 @@ def parse_bathrooms(text):
         return None
 
 
+def parse_license(text):
+    """Sort DC's license text into a type: 'Hosted License: 5007...' -> 'hosted'."""
+    text = str(text).lower() if pd.notna(text) else ""
+    for kind in ["unhosted", "hosted", "exempt"]:  # check "unhosted" before "hosted"
+        if text.startswith(kind):
+            return kind
+    return "none"
+
+
+def parse_price(text):
+    """'$1,234.00' -> 1234.0"""
+    return pd.to_numeric(pd.Series(text).astype(str).str.replace(r"[$,]", "", regex=True), errors="coerce").values
+
+
 def trim_extremes(df, column):
     low, high = df[column].quantile([TRIM_PERCENT / 100, 1 - TRIM_PERCENT / 100])
     return df[df[column].between(low, high)]
@@ -132,13 +160,22 @@ def clean_airbnb(path):
     raw = pd.read_csv(path, low_memory=False)  # also reads .csv.gz files
     require_columns(raw, ["id", "room_type", "property_type", "latitude", "longitude",
                           "bedrooms", "bathrooms_text", "estimated_revenue_l365d",
-                          "estimated_occupancy_l365d", "last_scraped"], path)
+                          "estimated_occupancy_l365d", "last_scraped", "price", "minimum_nights",
+                          "license", "first_review", "number_of_reviews_ltm"], path)
     report = Report(f"Airbnb ({path})", raw)
 
     df = report.step("not a whole home/apartment",
                      raw, raw[raw["room_type"] == "Entire home/apt"])
     df = report.step(f"booked fewer than {MIN_NIGHTS_BOOKED} nights last year",
                      df, df[df["estimated_occupancy_l365d"] >= MIN_NIGHTS_BOOKED])
+    df = report.step(f"requires stays of {MAX_MINIMUM_STAY}+ nights (a monthly rental)",
+                     df, df[df["minimum_nights"] < MAX_MINIMUM_STAY])
+
+    listed_since = pd.to_datetime(df["last_scraped"]) - pd.DateOffset(months=MIN_MONTHS_LISTED)
+    established = ((pd.to_datetime(df["first_review"]) <= listed_since)
+                   & (df["number_of_reviews_ltm"] >= MIN_REVIEWS_LAST_YEAR))
+    df = report.step(f"listed under {MIN_MONTHS_LISTED} months, or under "
+                     f"{MIN_REVIEWS_LAST_YEAR} reviews last year", df, df[established])
 
     df = df.assign(
         source="airbnb",
@@ -148,6 +185,9 @@ def clean_airbnb(path):
                   if "bathrooms" in df else df["bathrooms_text"].map(parse_bathrooms),
         monthly_income=(df["estimated_revenue_l365d"] / 12).round(),
         data_date=df["last_scraped"],
+        nightly_price=parse_price(df["price"]),
+        nights_booked=df["estimated_occupancy_l365d"],
+        license_type=df["license"].map(parse_license),
     )
     df = report.step("property type isn't a house or apartment (hotel room, etc.)",
                      df, df.dropna(subset=["property_type"]))
@@ -179,6 +219,7 @@ def clean_rentals(folder):
         property_type=raw["propertyType"],
         monthly_income=raw["price"],
         data_date=raw["lastSeenDate"].str[:10],  # keep just the date part
+        nightly_price=None, nights_booked=None, license_type=None,  # Airbnb-only columns
     )
     df = report.step("property type isn't a house or apartment",
                      df, df[df["property_type"].isin(PROPERTY_TYPES)])
@@ -203,6 +244,11 @@ def main():
     rentals.to_csv(os.path.join(OUT_DIR, "rentals.csv"), index=False)
     print(f"Saved {OUT_DIR}/airbnb.csv and {OUT_DIR}/rentals.csv\n")
 
+    print("Airbnb listings by DC license type:")
+    print(airbnb.groupby("license_type").agg(listings=("id", "count"),
+                                             median_nights=("nights_booked", "median"),
+                                             median_nightly_price=("nightly_price", "median")).to_string())
+    print()
     print("Median monthly income by bedrooms:")
     side_by_side = summarize(airbnb).add_suffix("_airbnb").join(summarize(rentals).add_suffix("_rental"))
     print(side_by_side.to_string())

@@ -4,7 +4,8 @@
 2. Local regression: fit a multiple linear regression on the nearest listings,
    then plug in the property's details.
 
-Both work the same way on the Airbnb table and on the rentals table.
+Both work the same way on the Airbnb table and on the rentals table, and can
+estimate any column ("target"): monthly income, or an Airbnb's nightly price.
 estimate.py uses them for one property; evaluate.py tests how accurate they are.
 """
 import numpy as np
@@ -49,9 +50,29 @@ def find_comps(df, lat, lon, bedrooms):
     return comps.sort_values("miles"), radius
 
 
-def baseline_predict(df, lat, lon, bedrooms):
+def baseline_predict(df, lat, lon, bedrooms, target="monthly_income"):
     comps, _ = find_comps(df, lat, lon, bedrooms)
-    return comps["monthly_income"].median() if len(comps) else np.nan
+    return comps[target].median() if len(comps) else np.nan
+
+
+def median_range(values, confidence=80, resamples=1000, seed=0):
+    """How sure we are about the median of these values (a bootstrap interval).
+
+    We resample the values many times (with replacement), take the median of
+    each resample, and keep the middle `confidence`% of those medians. This is
+    a range for the *typical* comparable listing, not for any single property.
+    """
+    values = np.asarray(values, dtype=float)
+    rng = np.random.default_rng(seed)
+    medians = np.median(rng.choice(values, (resamples, len(values))), axis=1)
+    tail = (100 - confidence) / 2
+    return np.percentile(medians, [tail, 100 - tail])
+
+
+def booking_levels(nights, cap=None):
+    """Low / typical / strong nights booked per year: the 25th, 50th, 75th percentiles."""
+    levels = np.percentile(nights, [25, 50, 75])
+    return np.minimum(levels, cap) if cap else levels
 
 
 # ---------- 2. Local regression ----------
@@ -70,7 +91,7 @@ def feature_matrix(bedrooms, bathrooms, is_house):
     ])
 
 
-def fit_local_regression(df, lat, lon):
+def fit_local_regression(df, lat, lon, target="monthly_income"):
     """Fit income = base + a*bedrooms + b*bathrooms + c*house on the nearest listings.
 
     Returns (coefficients, the listings it was fit on).
@@ -79,12 +100,12 @@ def fit_local_regression(df, lat, lon):
     X = feature_matrix(local["bedrooms"], local["bathrooms"],
                        local["property_type"].isin(HOUSE_TYPES))
     # Least squares: the coefficients that make predictions closest to actual income.
-    coefficients, *_ = np.linalg.lstsq(X, local["monthly_income"].to_numpy(), rcond=None)
+    coefficients, *_ = np.linalg.lstsq(X, local[target].to_numpy(dtype=float), rcond=None)
     return coefficients, local
 
 
-def regression_predict(df, lat, lon, bedrooms, bathrooms, property_type):
-    coefficients, local = fit_local_regression(df, lat, lon)
+def regression_predict(df, lat, lon, bedrooms, bathrooms, property_type, target="monthly_income"):
+    coefficients, local = fit_local_regression(df, lat, lon, target)
     x = feature_matrix(bedrooms, bathrooms, property_type in HOUSE_TYPES)
     prediction = (x @ coefficients)[0]
     return max(prediction, 0), coefficients, local  # income can't be negative
