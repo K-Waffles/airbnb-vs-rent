@@ -4,7 +4,7 @@ Run it and answer the questions:
     .venv/bin/python estimate.py
 
 It asks, in order:
-  1. Location (latitude, longitude).
+  1. Address (looked up with the free U.S. Census geocoder), or latitude, longitude.
   2. Setup: part of the home you live in (DC "hosted" rental, no night cap),
      or your whole home while you're away (DC "unhosted" rental, max 90 nights/year).
   3. Property type.
@@ -14,7 +14,7 @@ It asks, in order:
      to use the median of similar listings.
 
 Any answer can be given as a flag instead, to skip its question, e.g.:
-    .venv/bin/python estimate.py --setup part --lat 38.8899 --lon -76.9905 --bedrooms 1 --bathrooms 1 --type Apartment
+    .venv/bin/python estimate.py --address "1600 Pennsylvania Ave NW" --setup part --bedrooms 1 --bathrooms 1 --type Apartment
 
 Costs come from assumptions.py:
     .venv/bin/python estimate.py --assumptions               # list them, with sources
@@ -28,6 +28,7 @@ import re
 import pandas as pd
 
 from assumptions import print_settings, with_overrides
+from geocode import GeocodeError, geocode
 from costs import airbnb_break_even_nights, airbnb_lines, net, rental_lines
 from models import (MIN_COMPS, PROPERTY_TYPES_FOR_INPUT, booking_levels, find_comps,
                     median_range, regression_predict)
@@ -108,11 +109,57 @@ def sensible_size(size):
     return beds == int(beds) and 0 <= beds <= 6 and 0 < baths <= 6
 
 
+def coordinates(text):
+    """'38.8899, -76.9905' -> (38.8899, -76.9905), or None if the text isn't coordinates.
+
+    Requires decimals, so an address like '1600 Pennsylvania Ave NW 20500' isn't mistaken for them.
+    """
+    match = re.fullmatch(r"\s*(-?\d+\.\d+)\s*,?\s*(-?\d+\.\d+)\s*", text)
+    return (float(match[1]), float(match[2])) if match else None
+
+
+def find_location(text):
+    """An address or 'lat, lon' -> (lat, lon, description). Returns None, with a message, if not found."""
+    coords = coordinates(text)
+    if coords:
+        if not in_dc(coords):
+            print("  Those coordinates aren't in DC.")
+            return None
+        return coords[0], coords[1], f"({coords[0]}, {coords[1]})"
+    try:
+        place = geocode(text)
+    except GeocodeError as e:
+        print(f"  {e} You can enter latitude, longitude instead.")
+        return None
+    if place is None:
+        print("  Couldn't find that DC address. Include the house number and street, "
+              "e.g. 1600 Pennsylvania Ave NW.")
+        return None
+    return place["lat"], place["lon"], f"{place['address']} ({place['tract']})"
+
+
+def ask_location():
+    print("Address of the property (or latitude, longitude):")
+    while True:
+        found = find_location(input("Address: ").strip())
+        if found is None:
+            continue
+        print(f"  Found: {found[2]}")
+        if input("  Is that right? (press Enter for yes, or type n): ").strip().lower() not in ("n", "no"):
+            return found
+
+
 def fill_in_property(args):
     """Ask for anything about the property that wasn't given as a flag."""
-    if args.lat is None or args.lon is None:
-        print("Location: latitude and longitude (in Google Maps, right-click the spot to copy them).")
-        args.lat, args.lon = ask("Location (e.g. 38.8899, -76.9905):", two_numbers, check=in_dc)
+    if args.address:
+        found = find_location(args.address)
+        if found is None:
+            raise SystemExit(1)
+        args.lat, args.lon, args.place = found
+    elif args.lat is not None and args.lon is not None:
+        args.place = f"({args.lat}, {args.lon})"
+    else:
+        args.lat, args.lon, args.place = ask_location()
     if args.setup is None:
         print()
         args.setup = ask_setup()
@@ -319,7 +366,8 @@ def main():
                                                  "Any answer not given as a flag is asked for.")
     parser.add_argument("--setup", choices=SETUPS,
                         help="part: part of your home, while you live there; whole: whole home while away")
-    parser.add_argument("--lat", type=float, help="latitude, e.g. 38.8899")
+    parser.add_argument("--address", help='street address in DC, e.g. "1600 Pennsylvania Ave NW"')
+    parser.add_argument("--lat", type=float, help="latitude, e.g. 38.8899 (instead of an address)")
     parser.add_argument("--lon", type=float, help="longitude, e.g. -76.9905")
     parser.add_argument("--bedrooms", type=int, help="bedrooms in the space you'd rent out (0 for a studio)")
     parser.add_argument("--bathrooms", type=float, help="e.g. 1.5")
@@ -341,7 +389,8 @@ def main():
     b = airbnb_basis(pd.read_csv(AIRBNB_CLEAN), args)
     nights = ask_nights(args.setup, b["typical"], b["cap"]) if b else None
 
-    print(f"\nProperty: {args.bedrooms} bd / {args.bathrooms:g} ba {args.type} at ({args.lat}, {args.lon})")
+    print(f"\nProperty: {args.bedrooms} bd / {args.bathrooms:g} ba {args.type}")
+    print(f"Location: {args.place}")
     print(f"Renting out: {SETUPS[args.setup]}\n")
     _, rent_net = estimate_rent(pd.read_csv(RENTALS_CLEAN), args, a)
     airbnb_net = estimate_airbnb(b, args, nights, a)
@@ -349,4 +398,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except (KeyboardInterrupt, EOFError):  # Ctrl+C, or input ended
+        print("\nCancelled.")
+        raise SystemExit(1)
