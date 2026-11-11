@@ -8,8 +8,11 @@ How Streamlit works: every time you change an input, Streamlit re-runs this
 whole script from top to bottom and redraws the page. So the code reads like
 a simple script: ask, then show. All the math lives in analysis.py.
 """
+import html
+import re
 import time
 
+import altair as alt
 import pandas as pd
 import streamlit as st
 from streamlit_searchbox import st_searchbox
@@ -85,6 +88,106 @@ def result_card(column, label, value, favorable):
     )
 
 
+def pretty_address(place):
+    """Split an address into its street line and the rest, and undo the Census's ALL CAPS:
+    '1401 PENNSYLVANIA AVE SE, WASHINGTON, DC, 20003' -> ('1401 Pennsylvania Ave SE', 'Washington, DC 20003').
+    """
+    if place.startswith("("):  # typed coordinates, e.g. "(38.88, -76.98)"
+        return place, ""
+    street, _, rest = place.partition(",")
+    rest = re.sub(r",\s*(\d{5})$", r" \1", rest.strip())  # "DC, 20003" -> "DC 20003"
+    if place.isupper():
+        keep_caps = {"NW", "NE", "SE", "SW", "DC"}
+        fix = lambda text: " ".join(w if w in keep_caps else w.capitalize() for w in text.split(" "))
+        street, rest = fix(street), fix(rest)
+    return street.strip(), rest
+
+
+def answers_summary(prop, nights):
+    """The answers at the top of the results: the address in one box, the rest in a 2x2 grid."""
+    street, rest = pretty_address(prop.place)
+    size = "Studio" if prop.bedrooms == 0 else f"{prop.bedrooms} bedroom{'s' if prop.bedrooms > 1 else ''}"
+    grid = [("Setup", SETUP_CHOICES[prop.setup].split(" (")[0]),
+            ("Property type", prop.type),
+            ("Size", size),
+            ("Bookings", f"{nights} nights a year" if nights else "Typical for similar listings")]
+    box = lambda label, value: (f'<div class="answer-box"><div class="answer-label">{label}</div>'
+                                f'<div class="answer-value">{html.escape(value)}</div></div>')
+    address = (f'<div class="answer-box"><div class="answer-label">Address</div>'
+               f'<div class="answer-value answer-address">{html.escape(street)}</div>'
+               f'<div class="answer-sub">{html.escape(rest)}</div></div>')
+    st.markdown(f'<div class="answers">{address}<div class="answers-grid">'
+                + "".join(box(label, value) for label, value in grid) + "</div></div>",
+                unsafe_allow_html=True)
+
+
+def stat_boxes(boxes, widths=None):
+    """Boxes side by side, each with a small label, a big value, and a line of detail under it.
+
+    Each box is (label, value, detail); a detail wrapped in *stars* is shown in italics.
+    `widths` sets each box's share of the row, e.g. [1, 1.6, 1]; equal if left out.
+    """
+    widths = widths or [1] * len(boxes)
+    columns = " ".join(f"{w}fr" for w in widths)
+    def detail_html(detail):
+        if detail.startswith("*") and detail.endswith("*"):
+            return f"<em>{html.escape(detail[1:-1])}</em>"
+        return html.escape(detail)
+
+    st.markdown(f'<div class="stat-grid" style="--columns: {columns}">' + "".join(
+        f'<div class="answer-box"><div class="answer-label">{html.escape(label)}</div>'
+        f'<div class="stat-value">{html.escape(value)}</div>'
+        f'<div class="answer-sub">{detail_html(detail)}</div></div>'
+        for label, value, detail in boxes) + "</div>", unsafe_allow_html=True)
+
+
+def bookings_chart(rows, rent_net):
+    """Horizontal bars: Airbnb income after costs at each booking level, with long-term rent as a line.
+
+    The level used in the estimate is dark brown; the others are a lighter tan (still 3:1
+    against the page so they stay visible). Hover a bar for its nights and gross income.
+    """
+    ink, muted, grid = "#3a2c26", "#a38b75", "#e3d7ca"
+    data = pd.DataFrame([{
+        # Short names, e.g. "Low (42)", "Max (90)"
+        "label": f"{row['level'].replace(' bookings', '').replace('Maximum allowed', 'Max')} ({row['nights']:.0f})",
+        "nights": row["nights"],
+        "net": row["net"],
+        "Net / month": ("−" if row["net"] < 0 else "") + money(abs(row["net"])),
+        "Gross / month": money(row["gross"]),
+        "Nights / year": f"{row['nights']:.0f}",
+        "chosen": row["chosen"],
+        "color": ink if row["chosen"] else muted,
+    } for row in sorted(rows, key=lambda r: r["nights"])])
+    chosen = data.loc[data["chosen"], "label"].iloc[0]
+
+    # "Nights booked" sits above the labels, lined up with their right edge.
+    y = alt.Y("label:N", sort=list(data["label"]), title="Nights booked",
+              axis=alt.Axis(ticks=False, domain=False, labelPadding=10, labelFontSize=13, labelColor=ink,
+                            titleAngle=0, titleAlign="right", titleBaseline="bottom", titleX=-10,
+                            titleY=-6, titleFontSize=12, titleFontWeight=600, titleColor=ink,
+                            labelFontWeight=alt.condition(f"datum.value == '{chosen}'",
+                                                          alt.value(700), alt.value(400))))
+    x = alt.X("net:Q", title=None,
+              axis=alt.Axis(format="$,.0f", tickCount=5, grid=True, gridColor=grid, gridWidth=1,
+                            domain=False, ticks=False, labelColor=ink, labelOpacity=0.7))
+    tooltip = ["label:N", "Nights / year:N", "Gross / month:N", "Net / month:N"]
+    bars = alt.Chart(data).mark_bar(size=24, cornerRadiusEnd=4).encode(
+        y=y, x=x, color=alt.Color("color:N", scale=None), tooltip=tooltip)
+    # Dollar amount just past each bar's end. A loss's bar points left, toward the
+    # labels, so its amount goes just right of $0 instead.
+    values = alt.Chart(data).transform_calculate(at="max(datum.net, 0)").mark_text(
+        align="left", dx=6, fontSize=13, color=ink).encode(
+        y=y, x="at:Q", text="Net / month:N", tooltip=tooltip)
+    rent = pd.DataFrame({"net": [rent_net], "text": [f"Long-term rent {money(rent_net)}"]})
+    rent_line = alt.Chart(rent).mark_rule(color=ink, strokeWidth=2, strokeDash=[5, 4]).encode(x="net:Q")
+    rent_label = alt.Chart(rent).mark_text(align="center", baseline="bottom", dy=-4, fontSize=12,
+                                           color=ink).encode(x="net:Q", y=alt.value(0), text="text:N")
+    return ((bars + values + rent_line + rent_label)
+            .properties(height=48 * len(data), padding={"top": 22, "right": 50, "left": 5, "bottom": 5})
+            .configure(font="Inter", background="transparent", view={"stroke": None}))
+
+
 # ---------- One question at a time ----------
 # The page remembers which question you're on ("step") and the answers so far
 # in st.session_state, which survives each re-run. Only the current question
@@ -128,6 +231,19 @@ header[data-testid="stHeader"] { display: none; }
 /* Bigger, easier-to-tap buttons on the question cards. */
 [class*="st-key-step_"]:not(.st-key-step_results) button,
 [class*="st-key-leaving_"] button { min-height: 3rem; }
+/* The answers at the top of the results: the address box, then a 2x2 grid of boxes. */
+.answers { display: flex; flex-direction: column; gap: 0.6rem; margin-bottom: 0.4rem; }
+.answers-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0.6rem; }
+.answer-box { background: #f3ebe2; border: 1px solid #e3d7ca; border-radius: 0.6rem; padding: 0.7rem 1rem; }
+.answer-label { font-size: 0.75rem; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase;
+                opacity: 0.65; }
+.answer-value { font-weight: 500; line-height: 1.35; }
+.answer-address { font-size: 1.25rem; font-weight: 600; }
+.answer-sub { font-size: 0.9rem; opacity: 0.75; }
+.stat-value { font-size: 1.6rem; font-weight: 600; line-height: 1.3; }
+/* Number boxes in the results, side by side (column widths set per row); stacked on phones. */
+.stat-grid { display: grid; grid-template-columns: var(--columns); gap: 0.6rem; }
+@media (max-width: 640px) { .stat-grid { grid-template-columns: 1fr; } }
 </style>""", unsafe_allow_html=True)
 
 state = st.session_state
@@ -384,9 +500,7 @@ with st.container(key="step_results"):
     basis = airbnb_basis(airbnb, prop)
     nights = answers.get("nights")
 
-    summary = [prop.place, SETUP_CHOICES[prop.setup].split(" (")[0], prop.type, size_label(prop.bedrooms),
-               f"{nights} nights/year" if nights else "typical bookings"]
-    st.caption(" · ".join(summary))
+    answers_summary(prop, nights)
     left, right = st.columns(2)
     with left:
         back_button("back_results", width="stretch")
@@ -411,17 +525,13 @@ with st.container(key="step_results"):
 
     # Airbnb details
     st.subheader("Airbnb")
-    low, high = basis["price_range"]
-    st.write(f"Nightly price: **{money(basis['price'])}** (80% sure the typical comp is "
-             f"{money(low)}-{money(high)}), from {len(basis['comps'])} {size_label(prop.bedrooms)} "
-             f"Airbnbs within {basis['radius']} mi. Nights booked come from {basis['source']}.")
-    levels = pd.DataFrame([{
-        "Booking level": row["level"] + ("  ← used above" if row["chosen"] else ""),
-        "Nights / year": f"{row['nights']:.0f}",
-        "Gross / month": money(row["gross"]),
-        "Net / month": money(row["net"]),
-    } for row in ab["rows"]])
-    st.dataframe(levels, hide_index=True, width="stretch")
+    low, high = basis["price_spread"]
+    beds = "Studios" if prop.bedrooms == 0 else f"{prop.bedrooms} bed{'s' if prop.bedrooms > 1 else ''}"
+    stat_boxes([("Nightly price", money(basis["price"]), "median"),
+                ("Similar properties are between", f"{money(low)}–{money(high)}", "*80% range*"),
+                (f"{len(basis['comps'])} similar Airbnbs", beds, f"within {basis['radius']} miles")],
+               widths=[1, 1.6, 1])  # the middle box holds the longest label and value
+    st.altair_chart(bookings_chart(ab["rows"], rent["net"]), width="stretch")
     with st.expander(f"Costs at {ab['chosen_nights']:.0f} nights a year"):
         st.dataframe(lines_table(ab["lines"]), hide_index=True, width="stretch")
 

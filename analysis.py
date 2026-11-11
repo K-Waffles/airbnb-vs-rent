@@ -100,7 +100,8 @@ def airbnb_basis(airbnb, prop):
     return {
         "comps": comps, "radius": radius, "cap": cap, "source": source,
         "price": comps["nightly_price"].median(),
-        "price_range": median_range(comps["nightly_price"]),
+        "price_range": median_range(comps["nightly_price"]),  # 80% range for the typical comp
+        "price_spread": tuple(comps["nightly_price"].quantile([0.1, 0.9])),  # where 80% of comps are priced
         "low": levels[0], "typical": levels[1], "strong": levels[2],
     }
 
