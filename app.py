@@ -281,6 +281,13 @@ header[data-testid="stHeader"] { display: none; }
 /* Bigger, easier-to-tap buttons on the question cards. */
 [class*="st-key-step_"]:not(.st-key-step_results) button,
 [class*="st-key-leaving_"] button { min-height: 3rem; }
+/* Answer buttons: a long label wraps onto more lines instead of being cut off with "...",
+   and every button in a column grows to match the tallest one. */
+[class*="st-key-answers_"] button :is([data-testid="stMarkdownContainer"], p) {
+    white-space: normal; overflow: visible; text-overflow: clip; }
+[class*="st-key-answers_"] [data-testid="stColumn"] > [data-testid="stVerticalBlock"] {
+    display: grid; grid-auto-rows: 1fr; }
+[class*="st-key-answers_"] :is([data-testid="stElementContainer"], .stButton, button) { height: 100%; }
 /* The answers at the top of the results: the address box, then a 2x2 grid of boxes. */
 .answers { display: flex; flex-direction: column; gap: 0.6rem; margin-bottom: 0.4rem; }
 .answers-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0.6rem; }
@@ -369,10 +376,11 @@ def answer_buttons(name, choices, next_step, columns=1, icons=None):
     (icon names from https://fonts.google.com/icons).
     """
     icons = icons or {}
-    cols = st.columns(columns)
-    for i, (value, label) in enumerate(choices.items()):
-        cols[i % columns].button(label, on_click=answer, args=(name, value, next_step), icon=icons.get(value),
-                                 width="stretch", key=f"{name}_{value}")
+    with st.container(key=f"answers_{name}"):  # long labels wrap; buttons share one height (see the CSS)
+        cols = st.columns(columns)
+        for i, (value, label) in enumerate(choices.items()):
+            cols[i % columns].button(label, on_click=answer, args=(name, value, next_step),
+                                     icon=icons.get(value), width="stretch", key=f"{name}_{value}")
 
 
 def result_buttons():
