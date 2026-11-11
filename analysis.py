@@ -152,11 +152,14 @@ def recommendation(rent, airbnb, basis, prop, nights, a):
     else:
         break_even_note = f"Airbnb earns more than renting if booked more than about {break_even:.0f} nights a year."
 
-    notes = [break_even_note, "Not counted: your own time hosting, and income tax (which applies to both)."]
+    notes = []
     if prop.setup == "whole":
         notes.append("Keep in mind: renting long-term means moving out. A vacation rental earns money "
                      f"only while you're away, up to {VACATION_RENTAL_CAP} nights a year.")
-    return {"winner": winner, "headline": headline, "break_even": break_even, "notes": notes}
+    return {"winner": winner, "headline": headline, "break_even": break_even,
+            "break_even_note": break_even_note,
+            "not_counted_note": "Not counted: your own time hosting, and income tax (which applies to both).",
+            "notes": notes}
 
 
 LEGAL_NOTES = [

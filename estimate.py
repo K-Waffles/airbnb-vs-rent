@@ -212,7 +212,7 @@ def print_recommendation(rec):
     print(f"  {rec['headline']}")
     if rec["winner"] is None:
         return
-    for note in rec["notes"]:
+    for note in [rec["break_even_note"], rec["not_counted_note"]] + rec["notes"]:
         print(f"  {note}")
     print("  Costs are assumptions: see them with --assumptions, change one with --set KEY=VALUE.")
     for note in LEGAL_NOTES:

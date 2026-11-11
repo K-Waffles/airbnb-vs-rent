@@ -1,0 +1,26 @@
+# Look and feel of the web page (app.py). Streamlit reads this file on start.
+# Restart the page after changing it.
+# All options: .venv/bin/streamlit config show
+
+[client]
+# Hide the "Deploy" button and most of Streamlit's menu.
+toolbarMode = "minimal"
+
+[theme]
+# Colors inspired by DC Metro: cream background, dark brown text and buttons.
+# Always light, whatever the viewer's light/dark setting: brown buttons
+# wouldn't stand out on a dark background.
+base = "light"
+primaryColor = "#3a2c26"
+backgroundColor = "#fdf7f1"
+secondaryBackgroundColor = "#f3ebe2"
+textColor = "#3a2c26"
+borderColor = "#e3d7ca"
+
+# Inter, loaded from Google Fonts by the viewer's browser.
+font = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+headingFont = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+headingFontWeights = 700
+baseRadius = "0.6rem"
+buttonRadius = "0.6rem"
+showWidgetBorder = true

@@ -99,11 +99,17 @@ def suggest_addresses(text, limit=5):
     except (OSError, ValueError, KeyError):
         return []
 
+    # If the text starts with a house number, only keep addresses whose number starts with it.
+    # (Otherwise "555" also matches streets like "5th Street".)
+    typed_number = re.match(r"\s*(\d+)", text)
+
     suggestions, seen = [], set()
     for f in features:
         p = f["properties"]
         # Only real street addresses in DC (the search box also covers bits of MD and VA).
         if p.get("state") != "District of Columbia" or not p.get("housenumber") or not p.get("street"):
+            continue
+        if typed_number and not str(p["housenumber"]).startswith(typed_number[1]):
             continue
         label = f"{p['housenumber']} {p['street']}, Washington, DC {p.get('postcode', '')}".strip()
         if label in seen:
