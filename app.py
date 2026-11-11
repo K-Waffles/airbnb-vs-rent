@@ -286,8 +286,8 @@ header[data-testid="stHeader"] { display: none; }
 [class*="st-key-answers_"] button :is([data-testid="stMarkdownContainer"], p) {
     white-space: normal; overflow: visible; text-overflow: clip; }
 [class*="st-key-answers_"] [data-testid="stColumn"] > [data-testid="stVerticalBlock"] {
-    display: grid; grid-auto-rows: 1fr; }
-[class*="st-key-answers_"] :is([data-testid="stElementContainer"], .stButton, button) { height: 100%; }
+    display: grid; grid-auto-rows: 1fr; grid-template-columns: minmax(0, 1fr); }  /* full-width column */
+[class*="st-key-answers_"] :is([data-testid="stElementContainer"], .stButton, button) { height: 100%; width: 100%; }
 /* The answers at the top of the results: the address box, then a 2x2 grid of boxes. */
 .answers { display: flex; flex-direction: column; gap: 0.6rem; margin-bottom: 0.4rem; }
 .answers-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0.6rem; }
@@ -494,7 +494,12 @@ def show_address_answered():
 
 def show_setup():
     question_header("setup", "What are you renting out?")
-    answer_buttons("setup", SETUP_CHOICES, "type",
+    # Keep the "(e.g. ...)" phrases together with non-breaking spaces, so a wrapped label breaks
+    # just before "(e.g." (and, on the narrowest phones, after "basement," too), never mid-phrase.
+    def keep_together(match):
+        return ", ".join(part.replace(" ", "\u00a0") for part in match[0].split(", "))
+    labels = {value: re.sub(r"\(.*\)", keep_together, label) for value, label in SETUP_CHOICES.items()}
+    answer_buttons("setup", labels, "type",
                    icons={"part": ":material/door_front:", "whole": ":material/home:"})
 
 
