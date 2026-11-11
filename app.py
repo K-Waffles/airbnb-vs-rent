@@ -9,11 +9,13 @@ whole script from top to bottom and redraws the page. So the code reads like
 a simple script: ask, then show. All the math lives in analysis.py.
 """
 import html
+import math
 import re
 import time
 
 import altair as alt
 import pandas as pd
+import pydeck as pdk
 import streamlit as st
 from streamlit_searchbox import st_searchbox
 
@@ -188,6 +190,54 @@ def bookings_chart(rows, rent_net):
             .configure(font="Inter", background="transparent", view={"stroke": None}))
 
 
+HOUSE_ICON = "https://cdn.jsdelivr.net/gh/jdecked/twemoji@15.1.0/assets/72x72/1f3e0.png"  # 🏠, CC-BY 4.0
+
+
+def comps_map(prop, airbnbs, rentals, radius):
+    """A map of the property and its comparable listings. Hover a dot to see its details."""
+    def size(c):
+        return f"{c['bedrooms']:.0f} bd / {c['bathrooms']:g} ba"
+
+    # The hover box shows each dot's "title" in bold, then its "details", one item per line.
+    # The map shows these as plain text, so line breaks are newline characters, not HTML.
+    airbnb_dots = airbnbs.assign(
+        color=[[255, 90, 95]] * len(airbnbs), radius=25, title="Airbnb",
+        details=["\n".join([size(c), c["property_type"], f"{money(c['nightly_price'])} / night",
+                            f"{c['nights_booked']:.0f} nights booked / year"]) for _, c in airbnbs.iterrows()])
+    rental_dots = rentals.assign(
+        color=[[31, 119, 180]] * len(rentals), radius=25, title="Rental",
+        details=["\n".join([size(c), c["property_type"], f"{money(c['monthly_income'])} / month"])
+                 for _, c in rentals.iterrows()])
+    columns = ["latitude", "longitude", "color", "radius", "title", "details"]
+    points = pd.concat([airbnb_dots[columns], rental_dots[columns]])
+    # The property is a 🏠 picture (Twemoji), since map dots can't show emoji reliably.
+    home = pd.DataFrame({"latitude": [prop.lat], "longitude": [prop.lon], "title": ["Your property"],
+                         "details": [pretty_address(prop.place)[0]],
+                         "icon": [{"url": HOUSE_ICON, "width": 72, "height": 72, "anchorY": 36}]})
+    home_icon = pdk.Layer("IconLayer", home, get_position=["longitude", "latitude"], get_icon="icon",
+                          get_size=28, pickable=True)  # size in pixels (the default unit)
+
+    def dots(data):
+        return pdk.Layer("ScatterplotLayer", data, get_position=["longitude", "latitude"],
+                         get_fill_color="color", get_radius="radius", radius_min_pixels=4,
+                         pickable=True, auto_highlight=True)  # pickable: can be hovered
+
+    # Zoom so the search circle fits: zoom 14 shows about half a mile around the point,
+    # and each zoom level out doubles that.
+    zoom = 14 - math.log2(max(radius, 0.5) / 0.5)
+    return pdk.Deck(
+        layers=[dots(points), home_icon],  # the property last, so it's drawn on top
+        initial_view_state=pdk.ViewState(latitude=prop.lat, longitude=prop.lon, zoom=zoom),
+        map_style=pdk.map_styles.CARTO_LIGHT,  # the light street map, to match the page
+        tooltip={"html": "<b>{title}</b>\n{details}",
+                 "style": {"whiteSpace": "pre-line",  # turns the newlines into line breaks
+                           "backgroundColor": "#fdf7f1", "color": "#3a2c26",
+                           "fontFamily": "Inter, sans-serif", "fontSize": "13px",
+                           "border": "1px solid #e3d7ca", "borderRadius": "0.6rem",
+                           "padding": "0.5rem 0.7rem"}},
+    )
+
+
 # ---------- One question at a time ----------
 # The page remembers which question you're on ("step") and the answers so far
 # in st.session_state, which survives each re-run. Only the current question
@@ -240,6 +290,18 @@ header[data-testid="stHeader"] { display: none; }
 .answer-value { font-weight: 500; line-height: 1.35; }
 .answer-address { font-size: 1.25rem; font-weight: 600; }
 .answer-sub { font-size: 0.9rem; opacity: 0.75; }
+/* More room above each results section (Airbnb, Long-term rental, Comparable listings)
+   and above the Back / Start over buttons at the end. */
+.st-key-step_results [data-testid="stElementContainer"]:has(h3), .st-key-result_buttons { margin-top: 3.5rem; }
+/* The map's key, floating over its top-left corner on a cream box. */
+.st-key-comps_map { position: relative; }
+.st-key-comps_map [data-testid="stElementContainer"]:has(.map-key) {
+    position: absolute; top: 0.75rem; left: 0.75rem; width: auto; z-index: 10; }
+.map-key { display: flex; flex-direction: column; gap: 0.2rem; background: #fdf7f1; border: 1px solid #e3d7ca;
+           border-radius: 0.6rem; padding: 0.45rem 0.7rem; font-size: 0.85rem; }
+.map-key span { display: flex; align-items: center; gap: 0.45rem; }
+.map-key i { width: 0.65rem; height: 0.65rem; border-radius: 50%; }
+.map-key img { width: 0.9rem; height: 0.9rem; margin: 0 -0.125rem; }  /* the 🏠, a little bigger than the dots */
 .stat-value { font-size: 1.6rem; font-weight: 600; line-height: 1.3; }
 /* Number boxes in the results, side by side (column widths set per row); stacked on phones. */
 .stat-grid { display: grid; grid-template-columns: var(--columns); gap: 0.6rem; }
@@ -311,6 +373,15 @@ def answer_buttons(name, choices, next_step, columns=1, icons=None):
     for i, (value, label) in enumerate(choices.items()):
         cols[i % columns].button(label, on_click=answer, args=(name, value, next_step), icon=icons.get(value),
                                  width="stretch", key=f"{name}_{value}")
+
+
+def result_buttons():
+    """Back and Start over, side by side, at the end of the results."""
+    with st.container(key="result_buttons"):  # spaced like a section (see the CSS)
+        left, right = st.columns(2)
+        with left:
+            back_button("back_results", width="stretch")
+        right.button("Start over", on_click=start_over, icon=":material/restart_alt:", width="stretch")
 
 
 def back_button(key, **kwargs):
@@ -501,10 +572,6 @@ with st.container(key="step_results"):
     nights = answers.get("nights")
 
     answers_summary(prop, nights)
-    left, right = st.columns(2)
-    with left:
-        back_button("back_results", width="stretch")
-    right.button("Start over", on_click=start_over, icon=":material/restart_alt:", width="stretch")
 
 
     a = defaults()
@@ -516,6 +583,7 @@ with st.container(key="step_results"):
 
     if rec["winner"] is None:
         st.warning(rec["headline"])
+        result_buttons()  # the page ends here, so the buttons go here too
         st.stop()
 
     # Headline numbers
@@ -553,15 +621,14 @@ with st.container(key="step_results"):
 
     # Comparable listings: map and tables
     st.subheader("Comparable listings")
-    points = pd.concat([
-        pd.DataFrame({"lat": [lat], "lon": [lon], "color": ["#d62728"], "size": [60]}),        # the property
-        basis["comps"].assign(color="#ff5a5f", size=25)[["latitude", "longitude", "color", "size"]]
-            .rename(columns={"latitude": "lat", "longitude": "lon"}),                             # Airbnbs
-        rent["comps"].assign(color="#1f77b4", size=25)[["latitude", "longitude", "color", "size"]]
-            .rename(columns={"latitude": "lat", "longitude": "lon"}),                             # rentals
-    ])
-    st.map(points, latitude="lat", longitude="lon", color="color", size="size")
-    st.caption("Dark red: the property. Pink: comparable Airbnbs. Blue: comparable rentals.")
+    with st.container(key="comps_map"):  # the key floats over the map's top-left corner (see the CSS)
+        st.pydeck_chart(comps_map(prop, basis["comps"], rent["comps"], max(basis["radius"], rent["radius"])))
+        # Each item: the dot's color, then the text's color (a bit deeper where the dot is too light to read).
+        key = [("Airbnb", "#ff5a5f", "#e0393e"), ("Rental", "#1f77b4", "#1f77b4")]
+        st.markdown('<div class="map-key">' + "".join(
+            f'<span><i style="background: {dot}"></i><b style="color: {text}">{label}</b></span>'
+            for label, dot, text in key)
+            + f'<span><img src="{HOUSE_ICON}" alt=""><b>Your property</b></span></div>', unsafe_allow_html=True)
     with st.expander("Closest comparable Airbnbs"):
         st.dataframe(comps_table(basis["comps"], {
             "nightly_price": ("Price / night", money),
@@ -571,10 +638,11 @@ with st.container(key="step_results"):
         st.dataframe(comps_table(rent["comps"], {
             "monthly_income": ("Rent / month", money),
         }), hide_index=True, width="stretch")
+    result_buttons()
 
     st.divider()
     for note in LEGAL_NOTES:
         st.caption(note)
     st.caption("Data: Airbnb listings from Inside Airbnb (insideairbnb.com); rental listings from RentCast; "
-               "address suggestions via Photon (© OpenStreetMap contributors); addresses located with the "
+               "address suggestions via Photon (© OpenStreetMap contributors); house icon from Twemoji (CC-BY 4.0); addresses located with the "
                "U.S. Census Bureau geocoder. Costs are assumptions; see assumptions.py.")
