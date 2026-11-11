@@ -8,13 +8,13 @@ It asks, in order:
   2. Setup: part of the home you live in (DC "hosted" rental, no night cap),
      or your whole home while you're away (DC "unhosted" rental, max 90 nights/year).
   3. Property type.
-  4. Bedrooms and bathrooms in the space available to guests.
+  4. Bedrooms in the space available to guests.
   5. Optionally, how many nights a year you expect guests to book. The question
      shows what similar listings get, and the cap if it applies. Press Enter
      to use the median of similar listings.
 
 Any answer can be given as a flag instead, to skip its question, e.g.:
-    .venv/bin/python estimate.py --address "1600 Pennsylvania Ave NW" --setup part --bedrooms 1 --bathrooms 1 --type Apartment
+    .venv/bin/python estimate.py --address "1600 Pennsylvania Ave NW" --setup part --bedrooms 1 --type Apartment
 
 Costs come from assumptions.py:
     .venv/bin/python estimate.py --assumptions               # list them, with sources
@@ -23,35 +23,15 @@ Costs come from assumptions.py:
 Uses the clean tables from clean_data.py, so run that first.
 """
 import argparse
-import re
 
-import pandas as pd
-
+from analysis import (LEGAL_NOTES, SETUPS, Property, airbnb_basis, analyze, load_data,
+                      money, size_label)
 from assumptions import print_settings, with_overrides
-from geocode import GeocodeError, geocode
-from costs import airbnb_break_even_nights, airbnb_lines, net, rental_lines
-from models import (MIN_COMPS, PROPERTY_TYPES_FOR_INPUT, booking_levels, find_comps,
-                    median_range, regression_predict)
+from costs import net
+from geocode import GeocodeError, coordinates, geocode, in_dc
+from models import MIN_COMPS, PROPERTY_TYPES_FOR_INPUT
 
-AIRBNB_CLEAN = "data/clean/airbnb.csv"
-RENTALS_CLEAN = "data/clean/rentals.csv"
-
-VACATION_RENTAL_CAP = 90  # DC's yearly night cap for unhosted (whole-home) rentals
-DISAGREE_PERCENT = 15      # flag the rent estimate if the two methods differ by more
-SHOW_COMPS = 5             # how many of the closest comps to print
-
-SETUPS = {
-    "part": "part of your home, while you live there (hosted: no night cap)",
-    "whole": f"your whole home, while you're away (unhosted: max {VACATION_RENTAL_CAP} nights/year)",
-}
-
-
-def money(x):
-    return f"${x:,.0f}"
-
-
-def size_label(bedrooms):
-    return "studio" if bedrooms == 0 else f"{bedrooms}-bedroom"
+SHOW_COMPS = 5  # how many of the closest comps to print
 
 
 # ---------- Asking questions ----------
@@ -89,33 +69,6 @@ def ask_type():
     choice = ask(f"Enter 1-{len(PROPERTY_TYPES_FOR_INPUT)}:", int,
                  check=lambda v: 1 <= v <= len(PROPERTY_TYPES_FOR_INPUT))
     return PROPERTY_TYPES_FOR_INPUT[choice - 1]
-
-
-def two_numbers(text):
-    """Pull exactly two numbers out of text: '38.89, -76.99' or '2 bed 1.5 bath'."""
-    numbers = re.findall(r"-?\d+(?:\.\d+)?", text)
-    if len(numbers) != 2:
-        raise ValueError
-    return float(numbers[0]), float(numbers[1])
-
-
-def in_dc(location):  # a rough box around DC
-    lat, lon = location
-    return 38.7 <= lat <= 39.1 and -77.2 <= lon <= -76.8
-
-
-def sensible_size(size):
-    beds, baths = size
-    return beds == int(beds) and 0 <= beds <= 6 and 0 < baths <= 6
-
-
-def coordinates(text):
-    """'38.8899, -76.9905' -> (38.8899, -76.9905), or None if the text isn't coordinates.
-
-    Requires decimals, so an address like '1600 Pennsylvania Ave NW 20500' isn't mistaken for them.
-    """
-    match = re.fullmatch(r"\s*(-?\d+\.\d+)\s*,?\s*(-?\d+\.\d+)\s*", text)
-    return (float(match[1]), float(match[2])) if match else None
 
 
 def find_location(text):
@@ -166,11 +119,10 @@ def fill_in_property(args):
     if args.type is None:
         print()
         args.type = ask_type()
-    if args.bedrooms is None or args.bathrooms is None:
+    if args.bedrooms is None:
         print()
-        beds, baths = ask("Bedrooms and bathrooms in the space available to guests "
-                          "(e.g. 2 bed 1.5 bath; 0 bedrooms for a studio):", two_numbers, check=sensible_size)
-        args.bedrooms, args.bathrooms = int(beds), baths
+        args.bedrooms = ask("Bedrooms in the space available to guests (0 for a studio):", int,
+                            check=lambda v: 0 <= v <= 6)
 
 
 def ask_nights(setup, typical, cap):
@@ -190,7 +142,7 @@ def ask_nights(setup, typical, cap):
     return nights
 
 
-# ---------- Printing helpers ----------
+# ---------- Printing results ----------
 
 def print_comps(comps, columns):
     for _, c in comps.head(SHOW_COMPS).iterrows():
@@ -209,144 +161,62 @@ def print_lines(title, lines):
     print(f"    {'Net income':<32} {money(net(lines)):>9} per month")
 
 
-# ---------- Long-term rental ----------
-
-def estimate_rent(rentals, args, a):
-    """Print the rent estimate and costs. Returns (gross rent, net rent)."""
-    comps, radius = find_comps(rentals, args.lat, args.lon, args.bedrooms)
+def print_rent(r, prop):
     print("LONG-TERM RENTAL")
-    if comps.empty:
+    if r is None:
         print("  No comparable rentals found.\n")
-        return None, None
-
-    rent = comps["monthly_income"]
-    estimate = rent.median()
-    low, high = median_range(rent)
-    print(f"  Typical rent: {money(estimate)}/month   "
+        return
+    low, high = r["typical_range"]
+    print(f"  Typical rent: {money(r['estimate'])}/month   "
           f"(80% sure the typical comp is {money(low)}-{money(high)})")
-    print(f"  Based on {len(comps)} {size_label(args.bedrooms)} rentals within {radius} mi.")
+    print(f"  Based on {len(r['comps'])} {size_label(prop.bedrooms)} rentals within {r['radius']} mi.")
     print(f"  Individual rentals vary more: the middle half rent for "
-          f"{money(rent.quantile(0.25))}-{money(rent.quantile(0.75))}.")
-
-    check, _, _ = regression_predict(rentals, args.lat, args.lon, args.bedrooms,
-                                     args.bathrooms, args.type)
-    gap = (check - estimate) / estimate * 100
-    note = "agrees" if abs(gap) <= DISAGREE_PERCENT else "disagrees, so treat this estimate with caution"
-    print(f"  Cross-check (regression using bathrooms and type too): {money(check)} ({gap:+.0f}%, {note})")
-    if len(comps) < MIN_COMPS:
+          f"{money(r['middle_half'][0])}-{money(r['middle_half'][1])}.")
+    note = "agrees" if r["check_agrees"] else "disagrees, so treat this estimate with caution"
+    print(f"  Cross-check (regression using property type too): "
+          f"{money(r['check'])} ({r['check_gap']:+.0f}%, {note})")
+    if r["few_comps"]:
         print(f"  Warning: fewer than {MIN_COMPS} comps, so this estimate is shaky.")
     print("  Closest comps:")
-    print_comps(comps, [("monthly_income", lambda v: f"{money(v)}/mo")])
+    print_comps(r["comps"], [("monthly_income", lambda v: f"{money(v)}/mo")])
     print()
-    lines = rental_lines(estimate, a)
-    print_lines("After costs:", lines)
+    print_lines("After costs:", r["lines"])
     print()
-    return estimate, net(lines)
 
 
-# ---------- Airbnb ----------
-
-def airbnb_basis(airbnb, args):
-    """Everything the Airbnb estimate needs before asking about nights.
-
-    Returns None if there are no comparable listings.
-    """
-    # Nightly price: what similar listings nearby charge. Price depends on the
-    # property, so every license type counts.
-    comps, radius = find_comps(airbnb, args.lat, args.lon, args.bedrooms)
-    if comps.empty:
-        return None
-
-    # Nights booked: depends on the setup, because DC's rules differ.
-    if args.setup == "part":
-        hosted, hosted_radius = find_comps(airbnb[airbnb["license_type"] == "hosted"],
-                                           args.lat, args.lon, args.bedrooms)
-        cap = None
-        levels = booking_levels(hosted["nights_booked"])
-        source = f"{len(hosted)} hosted listings within {hosted_radius} mi"
-    else:
-        unhosted = airbnb[airbnb["license_type"] == "unhosted"]  # too few to use only nearby ones
-        cap = VACATION_RENTAL_CAP
-        levels = booking_levels(unhosted["nights_booked"], cap=cap)
-        source = f"all {len(unhosted)} unhosted listings in DC"
-
-    return {
-        "comps": comps, "radius": radius, "cap": cap, "source": source,
-        "price": comps["nightly_price"].median(),
-        "price_range": median_range(comps["nightly_price"]),
-        "low": levels[0], "typical": levels[1], "strong": levels[2],
-    }
-
-
-def estimate_airbnb(b, args, nights, a):
-    """Print the Airbnb estimate and costs. Returns net monthly income at the chosen nights."""
+def print_airbnb(b, ab, prop):
     print("AIRBNB")
     if b is None:
         print("  No comparable Airbnbs found.\n")
-        return None
-    price = b["price"]
+        return
     low, high = b["price_range"]
-    print(f"  Nightly price: {money(price)}   (80% sure the typical comp is {money(low)}-{money(high)})")
-    print(f"  Based on {len(b['comps'])} {size_label(args.bedrooms)} Airbnbs within {b['radius']} mi.")
+    print(f"  Nightly price: {money(b['price'])}   (80% sure the typical comp is {money(low)}-{money(high)})")
+    print(f"  Based on {len(b['comps'])} {size_label(prop.bedrooms)} Airbnbs within {b['radius']} mi.")
     print(f"  Nights booked per year, from {b['source']}.")
     print("  Closest comps:")
     print_comps(b["comps"], [("nightly_price", lambda v: f"{money(v)}/night"),
                              ("nights_booked", lambda v: f"{v:.0f} nights")])
     print()
-
-    rows = [("Low bookings", b["low"]), ("Typical bookings", b["typical"]), ("Strong bookings", b["strong"])]
-    if b["cap"]:
-        rows.append(("Maximum allowed", b["cap"]))
-    if nights is not None:
-        rows.append(("Your estimate", nights))
-    # The row the recommendation uses: the user's estimate, or else the typical (median).
-    chosen_row = "Your estimate" if nights is not None else "Typical bookings"
-    chosen = nights if nights is not None else b["typical"]
-
-    def lines_at(n):
-        return airbnb_lines(price, n, args.bedrooms, args.setup, a)
-
     print(f"  Monthly income, averaged over the year:  {'gross':>8} {'net':>9}")
-    for name, n in rows:
-        marker = "  <- used below" if name == chosen_row else ""
-        gross = lines_at(n)[0][1]  # nightly bookings only
-        print(f"    {name:<18} {n:>4.0f} nights/year  {money(gross):>8} {money(net(lines_at(n))):>9}{marker}")
+    for row in ab["rows"]:
+        marker = "  <- used below" if row["chosen"] else ""
+        print(f"    {row['level']:<18} {row['nights']:>4.0f} nights/year  "
+              f"{money(row['gross']):>8} {money(row['net']):>9}{marker}")
     print()
-    print_lines(f"After costs, at {chosen:.0f} nights/year:", lines_at(chosen))
+    print_lines(f"After costs, at {ab['chosen_nights']:.0f} nights/year:", ab["lines"])
     print()
-    return net(lines_at(chosen))
 
 
-# ---------- Recommendation ----------
-
-def recommend(rent_net, airbnb_net, b, nights, args, a):
+def print_recommendation(rec):
     print("RECOMMENDATION (after costs)")
-    if rent_net is None or airbnb_net is None:
-        print("  Not enough comparable listings to compare.")
+    print(f"  {rec['headline']}")
+    if rec["winner"] is None:
         return
-
-    basis = "your estimate of nights" if nights is not None else "typical bookings"
-    winner = "Airbnb" if airbnb_net > rent_net else "Long-term renting"
-    print(f"  With {basis}: {winner} earns more "
-          f"(Airbnb {money(airbnb_net)} vs. rent {money(rent_net)} per month, after costs).")
-
-    # Break-even: how many nights Airbnb needs to match renting, after costs.
-    break_even = airbnb_break_even_nights(b["price"], args.bedrooms, args.setup, a, rent_net)
-    if b["cap"] and break_even > b["cap"]:
-        print(f"  Even at DC's {b['cap']}-night maximum, renting earns more. "
-              f"Airbnb would need about {break_even:.0f} nights.")
-    elif break_even > 365:
-        print("  Airbnb can't match renting here, even booked every night.")
-    else:
-        print(f"  Airbnb earns more than renting if booked more than about {break_even:.0f} nights a year.")
-
-    print("  Not counted: your own time hosting, and income tax (which applies to both).")
-    if args.setup == "whole":
-        print("  Keep in mind: renting long-term means moving out. A vacation rental earns money")
-        print(f"  only while you're away, up to {VACATION_RENTAL_CAP} nights a year.")
+    for note in rec["notes"]:
+        print(f"  {note}")
     print("  Costs are assumptions: see them with --assumptions, change one with --set KEY=VALUE.")
-    print("  DC allows short-term rentals only in your primary residence, with a license.")
-    print("  Rules change, so check with DC's Department of Licensing and Consumer Protection.")
+    for note in LEGAL_NOTES:
+        print(f"  {note}")
 
 
 def parse_overrides(pairs):
@@ -370,7 +240,6 @@ def main():
     parser.add_argument("--lat", type=float, help="latitude, e.g. 38.8899 (instead of an address)")
     parser.add_argument("--lon", type=float, help="longitude, e.g. -76.9905")
     parser.add_argument("--bedrooms", type=int, help="bedrooms in the space you'd rent out (0 for a studio)")
-    parser.add_argument("--bathrooms", type=float, help="e.g. 1.5")
     parser.add_argument("--type", choices=PROPERTY_TYPES_FOR_INPUT)
     parser.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
                         help="change a cost assumption for this run (repeatable)")
@@ -386,15 +255,19 @@ def main():
         return
 
     fill_in_property(args)
-    b = airbnb_basis(pd.read_csv(AIRBNB_CLEAN), args)
-    nights = ask_nights(args.setup, b["typical"], b["cap"]) if b else None
+    prop = Property(lat=args.lat, lon=args.lon, setup=args.setup, bedrooms=args.bedrooms,
+                    type=args.type, place=args.place)
+    airbnb, rentals = load_data()
+    basis = airbnb_basis(airbnb, prop)
+    nights = ask_nights(prop.setup, basis["typical"], basis["cap"]) if basis else None
+    result = analyze(prop, nights, a, airbnb, rentals, basis)
 
-    print(f"\nProperty: {args.bedrooms} bd / {args.bathrooms:g} ba {args.type}")
-    print(f"Location: {args.place}")
-    print(f"Renting out: {SETUPS[args.setup]}\n")
-    _, rent_net = estimate_rent(pd.read_csv(RENTALS_CLEAN), args, a)
-    airbnb_net = estimate_airbnb(b, args, nights, a)
-    recommend(rent_net, airbnb_net, b, nights, args, a)
+    print(f"\nProperty: {size_label(prop.bedrooms)} {prop.type}")
+    print(f"Location: {prop.place}")
+    print(f"Renting out: {SETUPS[prop.setup]}\n")
+    print_rent(result["rent"], prop)
+    print_airbnb(result["basis"], result["airbnb"], prop)
+    print_recommendation(result["recommendation"])
 
 
 if __name__ == "__main__":

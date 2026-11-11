@@ -16,7 +16,7 @@ What it tests:
 import numpy as np
 import pandas as pd
 
-from estimate import AIRBNB_CLEAN, RENTALS_CLEAN
+from analysis import AIRBNB_CLEAN, RENTALS_CLEAN
 from models import baseline_predict, regression_predict
 
 SAMPLE_SIZE = 500
@@ -45,7 +45,7 @@ def predict_hidden(df, target, extra=None):
             "actual": l[target],
             "comps": baseline_predict(others, l["latitude"], l["longitude"], l["bedrooms"], target),
             "regression": regression_predict(others, l["latitude"], l["longitude"], l["bedrooms"],
-                                             l["bathrooms"], l["property_type"], target)[0],
+                                             l["property_type"], target)[0],
         }
         if extra:
             row.update(extra(others, l, row))

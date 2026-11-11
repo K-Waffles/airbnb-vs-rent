@@ -20,7 +20,7 @@ MIN_COMPS = 10
 REGRESSION_NEIGHBORS = 100
 # Property types counted as a "house"; everything else is an apartment/condo.
 HOUSE_TYPES = {"Single Family", "Townhouse", "Multi-Family"}
-FEATURES = ["base", "per bedroom", "per bathroom", "house vs. apartment"]
+FEATURES = ["base", "per bedroom", "house vs. apartment"]
 
 
 def distance_miles(lat1, lon1, lat2, lon2):
@@ -77,8 +77,8 @@ def booking_levels(nights, cap=None):
 
 # ---------- 2. Local regression ----------
 
-def feature_matrix(bedrooms, bathrooms, is_house):
-    """One row per listing: [1, bedrooms, bathrooms, 1 if house else 0].
+def feature_matrix(bedrooms, is_house):
+    """One row per listing: [1, bedrooms, 1 if house else 0].
 
     The leading 1 lets the regression learn a base amount (the intercept).
     """
@@ -86,30 +86,32 @@ def feature_matrix(bedrooms, bathrooms, is_house):
     return np.column_stack([
         np.ones(len(bedrooms)),
         bedrooms,
-        np.atleast_1d(bathrooms).astype(float),
         np.atleast_1d(is_house).astype(float),
     ])
 
 
 def fit_local_regression(df, lat, lon, target="monthly_income"):
-    """Fit income = base + a*bedrooms + b*bathrooms + c*house on the nearest listings.
+    """Fit income = base + a*bedrooms + b*house on the nearest listings.
+
+    Bathrooms used to be included. They helped this regression a little (rent: 14% vs. 17%
+    typical miss without them) but not the main comps estimate, so the app no longer asks.
 
     Returns (coefficients, the listings it was fit on).
     """
     local = with_distance(df, lat, lon).nsmallest(REGRESSION_NEIGHBORS, "miles")
-    X = feature_matrix(local["bedrooms"], local["bathrooms"],
-                       local["property_type"].isin(HOUSE_TYPES))
+    X = feature_matrix(local["bedrooms"], local["property_type"].isin(HOUSE_TYPES))
     # Least squares: the coefficients that make predictions closest to actual income.
     coefficients, *_ = np.linalg.lstsq(X, local[target].to_numpy(dtype=float), rcond=None)
     return coefficients, local
 
 
-def regression_predict(df, lat, lon, bedrooms, bathrooms, property_type, target="monthly_income"):
+def regression_predict(df, lat, lon, bedrooms, property_type, target="monthly_income"):
     coefficients, local = fit_local_regression(df, lat, lon, target)
-    x = feature_matrix(bedrooms, bathrooms, property_type in HOUSE_TYPES)
+    x = feature_matrix(bedrooms, property_type in HOUSE_TYPES)
     prediction = (x @ coefficients)[0]
     return max(prediction, 0), coefficients, local  # income can't be negative
 
 
-# Property types a user can enter (the same categories clean_data.py uses).
-PROPERTY_TYPES_FOR_INPUT = ["Apartment", "Condo", "Townhouse", "Single Family", "Multi-Family"]
+# Property types a user can enter. Multi-Family (2-4 unit buildings) is left out:
+# it's rare in the data, and someone renting one unit should describe that unit.
+PROPERTY_TYPES_FOR_INPUT = ["Apartment", "Condo", "Townhouse", "Single Family"]
