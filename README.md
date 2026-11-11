@@ -36,9 +36,14 @@ python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 ```
 
-### Get the data
+### Data
 
-The data isn't included in this repository, so you'll need to download it:
+The cleaned data the app uses is included in [data/clean/](data/clean/), so the app runs right after setup. It was collected in fall 2026:
+
+- `airbnb.csv`: active whole-home Airbnb listings in DC (Inside Airbnb, September 2026).
+- `rentals.csv`: active long-term rentals in DC (RentCast, November 2026).
+
+To refresh it with newer data:
 
 1. **Airbnb listings:** download the Washington, DC `listings.csv.gz` from [Inside Airbnb](https://insideairbnb.com/get-the-data/) and save it as `data/listings.csv` (or pass its path to `clean_data.py`).
 2. **Rental listings:** get a free API key from [RentCast](https://www.rentcast.io/api), create a file named `.env` containing `RENTCAST_API_KEY=your-key`, then run:
@@ -46,7 +51,7 @@ The data isn't included in this repository, so you'll need to download it:
    .venv/bin/python fetch_rentals.py
    ```
    It asks before each API call; all of DC takes about 6 calls.
-3. **Clean both datasets:**
+3. **Clean both datasets** (this rewrites `data/clean/`):
    ```bash
    .venv/bin/python clean_data.py
    ```

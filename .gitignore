@@ -1,4 +1,7 @@
-data/
+# Raw downloads stay private (the RentCast files include listing agents'
+# contact details). Only the cleaned tables in data/clean/ are shared.
+data/*
+!data/clean/
 __pycache__/
 .venv/
 .env
