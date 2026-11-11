@@ -89,7 +89,7 @@ def suggest_addresses(text, limit=5):
     Returns [{"label", "lat", "lon"}]. Returns [] if nothing matches or the
     service can't be reached (suggestions are a nice-to-have, never required).
     """
-    if len(text.strip()) < 3:
+    if not text.strip():
         return []
     params = {"q": text, "limit": limit * 3, "bbox": DC_BOX, "lang": "en"}
     url = PHOTON_URL + "?" + urllib.parse.urlencode(params)

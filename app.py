@@ -238,9 +238,11 @@ def show_address():
     choice = st_searchbox(
         address_suggestions,
         placeholder="Address not found" if not_found else "Property address",
-        debounce=300,          # wait for a pause in typing before looking up suggestions
+        debounce=150,          # wait for a short pause in typing before looking up suggestions
         style_absolute=True,   # float the dropdown over the page instead of pushing it down
-        style_overrides={"clear": {"clearable": "always"}, "searchbox": searchbox_style},
+        style_overrides={"clear": {"clearable": "always"},
+                         "dropdown": {"display": "none"},  # hide the arrow on the right
+                         "searchbox": searchbox_style},
         key="address",
     )
     if not choice:
